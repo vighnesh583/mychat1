@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { ref, push, onValue, update, get } from 'firebase/database';
+import { ref, push, onValue, update } from 'firebase/database';
 import { getToken, onMessage } from 'firebase/messaging';
 import { database, messaging, firebaseConfig } from '../firebase';
 import MessageBubble from './MessageBubble';
@@ -131,55 +131,6 @@ const ChatRoom = ({ username, onLogout }) => {
     return () => unsubscribe();
   }, [username]);
 
-  // Send notification to other users
-  const sendNotificationToOthers = async () => {
-    try {
-      const serverKey = import.meta.env.VITE_FCM_SERVER_KEY;
-      if (!serverKey) {
-        console.warn('VITE_FCM_SERVER_KEY is missing in .env. Background notifications will not be sent.');
-        return;
-      }
-
-      // Fetch all users to get their tokens
-      const usersSnapshot = await get(ref(database, 'users'));
-      const users = usersSnapshot.val();
-      if (!users) return;
-
-      const tokens = [];
-      Object.entries(users).forEach(([user, data]) => {
-        // Strict filter: Do NOT send to sender (username)
-        if (user !== username && data.fcmToken?.token) {
-          tokens.push(data.fcmToken.token);
-        }
-      });
-
-      if (tokens.length === 0) return;
-
-      // Send to each token
-      await Promise.all(tokens.map(token => 
-        fetch('https://fcm.googleapis.com/fcm/send', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `key=${serverKey}`
-          },
-          body: JSON.stringify({
-            to: token,
-            notification: {
-              title: 'New Message',
-              body: 'You have received a new message',
-              icon: '/vite.svg',
-              tag: 'new_message' // Group notifications
-            }
-          })
-        }).catch(err => console.error('Error sending FCM to token:', token, err))
-      ));
-
-    } catch (error) {
-      console.error('Failed to send background notifications:', error);
-    }
-  };
-
   // Send message to Firebase
   const handleSendMessage = async (text) => {
     try {
@@ -189,10 +140,6 @@ const ChatRoom = ({ username, onLogout }) => {
         timestamp: Date.now(),
         seen: false
       });
-      
-      // Trigger notification
-      sendNotificationToOthers();
-
     } catch (error) {
       console.error('Error sending message:', error);
       alert('Failed to send message. Please try again.');
