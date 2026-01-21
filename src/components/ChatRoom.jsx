@@ -16,7 +16,6 @@ const ChatRoom = ({ username, onLogout }) => {
   const [loading, setLoading] = useState(true);
   const [notificationPermission, setNotificationPermission] = useState(Notification.permission);
   const messagesEndRef = useRef(null);
-  const previousMessageIdsRef = useRef(new Set());
   const messagesRef = ref(database, 'messages');
 
   // Auto-scroll to latest message
@@ -28,66 +27,84 @@ const ChatRoom = ({ username, onLogout }) => {
     scrollToBottom();
   }, [messages]);
 
-  // FCM Setup & Permission Request
-  useEffect(() => {
-    const setupFCM = async () => {
-      try {
-        if (!('Notification' in window)) return;
-
-        const permission = await Notification.requestPermission();
-        setNotificationPermission(permission);
-
-        if (permission === 'granted') {
-          // Register Service Worker with config params
-          let registration;
-          if ('serviceWorker' in navigator) {
-             const urlParams = new URLSearchParams(firebaseConfig).toString();
-             registration = await navigator.serviceWorker.register(
-               `/firebase-messaging-sw.js?${urlParams}`
-             );
-          }
-
-          // Get Registration Token
-          const token = await getToken(messaging, { 
-            serviceWorkerRegistration: registration 
-          });
-
-          if (token) {
-            // Save token to database for this user
-            // We use a safe key for the username (assuming username is valid key, otherwise encode it)
-            // Ideally auth uid should be used, but using username as per existing app structure
-            update(ref(database, `users/${username}/fcmToken`), {
-              token,
-              lastUpdated: Date.now()
-            });
-          }
-        }
-      } catch (error) {
-        console.error('FCM Setup failed:', error);
+  // Handle User Permission Request
+  const requestNotificationPermission = async () => {
+    try {
+      const permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
+      
+      if (permission === 'granted') {
+        await registerServiceWorkerAndGetToken();
       }
-    };
+    } catch (error) {
+      console.error('Permission request failed:', error);
+    }
+  };
 
-    setupFCM();
+  // Register SW and Get Token
+  const registerServiceWorkerAndGetToken = async () => {
+    try {
+      let registration;
+      if ('serviceWorker' in navigator) {
+        const urlParams = new URLSearchParams(firebaseConfig).toString();
+        // Register SW with config to avoid hardcoding keys in public/sw.js
+        registration = await navigator.serviceWorker.register(
+          `/firebase-messaging-sw.js?${urlParams}`
+        );
+      }
 
-    // Handle foreground FCM messages
+      // Get Registration Token
+      const token = await getToken(messaging, { 
+        serviceWorkerRegistration: registration 
+      });
+
+      if (token) {
+        // Save token to database for this user
+        update(ref(database, `users/${username}/fcmToken`), {
+          token,
+          lastUpdated: Date.now()
+        });
+      }
+    } catch (error) {
+      console.error('FCM Token registration failed:', error);
+    }
+  };
+
+  // Initial Check on Mount
+  useEffect(() => {
+    if (Notification.permission === 'granted') {
+      registerServiceWorkerAndGetToken();
+    }
+  }, [username]);
+
+  // Handle Foreground Messages (FCM)
+  useEffect(() => {
     const unsubscribeFCM = onMessage(messaging, (payload) => {
       console.log('Foreground FCM Message received:', payload);
-      // We do NOT show a notification here because the onValue listener 
-      // already handles foreground notifications via the Notification API.
-      // This prevents duplicate notifications.
+      // Show foreground notification manually if needed
+      // Note: If the tab is focused, you might not want to annoy the user.
+      // But the requirement says "Notification must work when: Browser tab is open".
+      if (document.visibilityState === 'visible') {
+         // Optionally suppress if user is currently typing or looking at chat?
+         // For now, we show it as requested.
+         new Notification(payload.notification.title, {
+            body: payload.notification.body,
+            icon: payload.notification.icon,
+            tag: payload.notification.tag
+         });
+      }
     });
 
     return () => {
       if (unsubscribeFCM) unsubscribeFCM();
     };
-  }, [username]);
+  }, []);
 
-  // Subscribe to real-time messages from Firebase
+  // Subscribe to real-time messages from Firebase (Data Sync Only)
   useEffect(() => {
     const unsubscribe = onValue(messagesRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
-        // Convert messages object to array and sort by timestamp
         const messagesArray = Object.entries(data).map(([id, message]) => ({
           id,
           ...message
@@ -105,34 +122,16 @@ const ChatRoom = ({ username, onLogout }) => {
         if (Object.keys(updates).length > 0) {
           update(messagesRef, updates).catch(err => console.error('Failed to update seen status:', err));
         }
-
-        // Trigger browser notification for new messages (Foreground Logic)
-        if (!loading && notificationPermission === 'granted') {
-          messagesArray.forEach((message) => {
-            // Only notify for messages from others that we haven't seen before
-            if (message.username !== username && !previousMessageIdsRef.current.has(message.id)) {
-              new Notification('New Message', {
-                body: 'You have received a new message',
-                icon: '/vite.svg',
-                tag: message.id // Prevents duplicate notifications
-              });
-            }
-          });
-        }
-
-        // Update the set of known message IDs
-        previousMessageIdsRef.current = new Set(messagesArray.map(m => m.id));
       } else {
         setMessages([]);
       }
       setLoading(false);
     });
 
-    // Cleanup subscription on unmount
     return () => unsubscribe();
-  }, [loading, notificationPermission, username]);
+  }, [username]);
 
-  // Send notification to other users (Client-side implementation)
+  // Send notification to other users
   const sendNotificationToOthers = async () => {
     try {
       const serverKey = import.meta.env.VITE_FCM_SERVER_KEY;
@@ -148,6 +147,7 @@ const ChatRoom = ({ username, onLogout }) => {
 
       const tokens = [];
       Object.entries(users).forEach(([user, data]) => {
+        // Strict filter: Do NOT send to sender (username)
         if (user !== username && data.fcmToken?.token) {
           tokens.push(data.fcmToken.token);
         }
@@ -169,7 +169,7 @@ const ChatRoom = ({ username, onLogout }) => {
               title: 'New Message',
               body: 'You have received a new message',
               icon: '/vite.svg',
-              tag: 'new_message'
+              tag: 'new_message' // Group notifications
             }
           })
         }).catch(err => console.error('Error sending FCM to token:', token, err))
@@ -187,12 +187,10 @@ const ChatRoom = ({ username, onLogout }) => {
         text,
         username,
         timestamp: Date.now(),
-        seen: false // Default seen to false
+        seen: false
       });
       
-      // Trigger background notification
-      // Note: In a production environment with a backend, this should be triggered by a Cloud Function.
-      // Since we are client-side only, we call it here.
+      // Trigger notification
       sendNotificationToOthers();
 
     } catch (error) {
@@ -208,6 +206,16 @@ const ChatRoom = ({ username, onLogout }) => {
         <div className="chat-header-content">
           <h2>💬 Real-Time Chat</h2>
           <div className="user-info">
+             {/* Notification Permission Button */}
+            {notificationPermission === 'default' && (
+              <button 
+                onClick={requestNotificationPermission} 
+                className="notification-button"
+                title="Enable Notifications"
+              >
+                🔔 Enable Notifications
+              </button>
+            )}
             <span className="current-user">{username}</span>
             <button onClick={onLogout} className="logout-button">
               Logout
