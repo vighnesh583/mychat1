@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { ref, push, onValue, update, get } from 'firebase/database';
 import { getToken, onMessage } from 'firebase/messaging';
-import { database, messaging } from '../firebase';
+import { database, messaging, firebaseConfig } from '../firebase';
 import MessageBubble from './MessageBubble';
 import InputBox from './InputBox';
 import '../styles/ChatRoom.css';
@@ -38,8 +38,20 @@ const ChatRoom = ({ username, onLogout }) => {
         setNotificationPermission(permission);
 
         if (permission === 'granted') {
+          // Register Service Worker with config params
+          let registration;
+          if ('serviceWorker' in navigator) {
+             const urlParams = new URLSearchParams(firebaseConfig).toString();
+             registration = await navigator.serviceWorker.register(
+               `/firebase-messaging-sw.js?${urlParams}`
+             );
+          }
+
           // Get Registration Token
-          const token = await getToken(messaging);
+          const token = await getToken(messaging, { 
+            serviceWorkerRegistration: registration 
+          });
+
           if (token) {
             // Save token to database for this user
             // We use a safe key for the username (assuming username is valid key, otherwise encode it)
